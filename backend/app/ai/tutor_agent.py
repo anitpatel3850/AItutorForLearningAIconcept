@@ -3,7 +3,7 @@ import json
 import logging
 import re
 from typing import Dict, Any, Optional, List, Tuple
-from agents import Agent, Runner
+import google.genai as genai
 from app.config import settings
 from app.ai.tools import get_current_lesson, get_course_syllabus, generate_practice_question, evaluate_answer
 from app.data.courses_data import get_lesson_data, get_course_data
@@ -143,7 +143,8 @@ You are the AI Quest Tutor.
 Teach the student according to their current learning context.
 
 IMPORTANT:
-Answer the student's CURRENT message.
+Answer the student's CURRENT message directly in your opening sentence.
+Never start by mentioning or framing your answer around the lesson title or course title unless the student explicitly asked about it. (For example, if the student asks "What is overfitting?", explain what overfitting is directly, do not start with "In the context of Logistic Regression...").
 Never answer a previous example question.
 Never reuse a previous response unless it is relevant to the current conversation.
 Do not assume the user is asking about the previous topic.
@@ -157,7 +158,7 @@ COURSE:
 MODULE:
 {module_title}
 
-LESSON:
+CURRENT LESSON CONTEXT (for background reference only, do not force into answer):
 {lesson_title}
 
 STUDENT LEVEL:
@@ -169,7 +170,7 @@ RECENT PERFORMANCE:
 Use the current student message as the primary question to answer.
 
 PEDAGOGICAL GUIDELINES:
-1. Explain the student's requested concept directly, clearly, intuitively, and accurately.
+1. Explain the student's requested concept directly in the very first sentence clearly, intuitively, and accurately without introductory filler.
 2. Adapt strictly to the student's difficulty level ({difficulty.upper()}):
    - BEGINNER: Use relatable everyday analogies, clear step-by-step breakdowns, intuitive examples, and minimal complex notation.
    - INTERMEDIATE: Balance intuition with Python code patterns, parameter trade-offs, and metric analysis.
@@ -184,14 +185,12 @@ class AITutorAgentService:
     def __init__(self):
         self.model = settings.AI_MODEL
         self.tools = [get_current_lesson, get_course_syllabus, generate_practice_question, evaluate_answer]
-
-    def create_agent(self, instructions: str) -> Agent:
-        return Agent(
-            name="AI Quest Tutor",
-            instructions=instructions,
-            tools=self.tools,
-            model=self.model
-        )
+        self.client = None
+        if settings.GEMINI_API_KEY:
+            try:
+                self.client = genai.Client(api_key=settings.GEMINI_API_KEY)
+            except Exception as e:
+                logger.error(f"Failed to initialize Google GenAI Client: {e}")
 
     async def execute_tutor_turn(
         self,
@@ -262,34 +261,36 @@ class AITutorAgentService:
         if history_summary:
             full_prompt = f"Recent conversation context:\n{history_summary}\n\nCURRENT STUDENT MESSAGE (Answer this specifically):\n{action_prompt}"
 
-        # Check if OpenAI API key is configured
-        has_api_key = bool(settings.OPENAI_API_KEY and len(settings.OPENAI_API_KEY.strip()) > 5)
-
-        if has_api_key:
+        # Initialize client if not already initialized
+        if self.client is None and settings.GEMINI_API_KEY:
             try:
-                os.environ["OPENAI_API_KEY"] = settings.OPENAI_API_KEY
-                agent = self.create_agent(instructions)
-                
-                # Execute agent with Runner
-                result = await Runner.run(agent, full_prompt)
-                raw_text = result.final_output if hasattr(result, "final_output") else str(result)
-
-                # Parse suggestions and tags
-                clean_text, suggestions, tags = self._extract_metadata(raw_text, active_topic, lesson_data)
-                
-                logger.info(f"Agent response generated: {clean_text[:120]}...")
-
-                return {
-                    "text": clean_text,
-                    "difficulty": difficulty,
-                    "suggested_action": self._determine_suggested_action(action_type),
-                    "xp": 20,
-                    "concept_tags": tags,
-                    "followup_suggestions": suggestions,
-                    "topic": active_topic
-                }
+                self.client = genai.Client(api_key=settings.GEMINI_API_KEY)
             except Exception as e:
-                logger.warning(f"OpenAI Agents SDK execution failed ({e}), falling back to adaptive pedagogy engine")
+                logger.error(f"Failed to initialize Google GenAI Client: {e}")
+
+        # Check if Gemini API key and client are configured
+        if self.client:
+            try:
+                interaction = self.client.interactions.create(
+                    model=self.model,
+                    input=full_prompt,
+                    system_instruction=instructions
+                )
+                raw_text = interaction.output_text or ""
+                if raw_text.strip():
+                    clean_text, suggestions, tags = self._extract_metadata(raw_text, active_topic, lesson_data)
+                    logger.info(f"Gemini agent response generated: {clean_text[:120]}...")
+                    return {
+                        "text": clean_text,
+                        "difficulty": difficulty,
+                        "suggested_action": self._determine_suggested_action(action_type),
+                        "xp": 20,
+                        "concept_tags": tags,
+                        "followup_suggestions": suggestions,
+                        "topic": active_topic
+                    }
+            except Exception as e:
+                logger.warning(f"Gemini API execution failed ({e}), falling back to adaptive pedagogy engine")
 
         # Fallback adaptive pedagogical engine (100% reliable, zero failure rate, topic-driven)
         fallback_res = self._generate_contextual_fallback(

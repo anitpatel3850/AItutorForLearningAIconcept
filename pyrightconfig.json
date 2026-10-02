@@ -1,0 +1,15 @@
+{
+  "include": [
+    "backend"
+  ],
+  "exclude": [
+    "node_modules",
+    "**/node_modules"
+  ],
+  "extraPaths": [
+    "backend"
+  ],
+  "typeCheckingMode": "basic",
+  "reportMissingImports": "none",
+  "reportAttributeAccessIssue": "none"
+}

@@ -1,9 +1,7 @@
 import json
 from typing import Optional
-from agents import function_tool
 from app.data.courses_data import get_course_data, get_lesson_data, COURSES_CATALOG
 
-@function_tool
 def get_current_lesson(course_id: str, lesson_id: str) -> str:
     """Retrieve full details of the student's current lesson including learning objectives, explanation, and key points."""
     lesson = get_lesson_data(course_id, lesson_id)
@@ -19,7 +17,6 @@ def get_current_lesson(course_id: str, lesson_id: str) -> str:
         "key_points": lesson.get("key_points")
     })
 
-@function_tool
 def get_course_syllabus(course_id: str) -> str:
     """Retrieve the roadmap and module breakdown for a given course."""
     course = get_course_data(course_id)
@@ -41,7 +38,6 @@ def get_course_syllabus(course_id: str) -> str:
         "modules": modules_summary
     })
 
-@function_tool
 def generate_practice_question(course_id: str, lesson_id: str, difficulty: str) -> str:
     """Generate or retrieve an adaptive practice question for the given lesson and difficulty tier."""
     lesson = get_lesson_data(course_id, lesson_id)
@@ -75,7 +71,6 @@ def generate_practice_question(course_id: str, lesson_id: str, difficulty: str) 
             "hint": "Examine loss function convexity and step-size dynamics."
         })
 
-@function_tool
 def evaluate_answer(question: str, user_answer: str, concept: str) -> str:
     """Evaluate a student's answer to a conceptual or algorithmic question."""
     answer_len = len(user_answer.strip().split())
