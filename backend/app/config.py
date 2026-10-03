@@ -18,7 +18,9 @@ class Settings(BaseSettings):
     PORT: int = int(os.getenv("PORT", "8000"))
     HOST: str = os.getenv("HOST", "0.0.0.0")
     DEBUG: bool = os.getenv("DEBUG", "True").lower() in ("true", "1", "yes")
-    DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./tutor.db")
+    MONGODB_URI: str = os.getenv("MONGODB_URI", "mongodb://127.0.0.1:27017")
+    MONGODB_DATABASE: str = os.getenv("MONGODB_DATABASE", "ai_quest")
+    SECRET_KEY: str = os.getenv("SECRET_KEY", "ai-quest-secret-key-atlas-2026")
 
     class Config:
         env_file = ".env"

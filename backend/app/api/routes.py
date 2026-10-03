@@ -2,13 +2,11 @@ import json
 import logging
 import uuid
 from datetime import datetime
-from typing import List
+from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from motor.motor_asyncio import AsyncIOMotorDatabase
 
-logger = logging.getLogger("ai_tutor.routes")
-
+from app.database.mongodb import get_db
 from app.models.schemas import (
     TutorChatRequest,
     TutorChatResponse,
@@ -17,15 +15,10 @@ from app.models.schemas import (
     ConversationHistoryResponse,
     ConversationHistoryMessage
 )
-from app.models.database import (
-    get_db,
-    Conversation,
-    MessageRecord,
-    UserSession,
-    QuizEvaluationRecord
-)
 from app.ai.tutor_agent import tutor_agent_service
 from app.data.courses_data import COURSES_CATALOG, get_lesson_data
+
+logger = logging.getLogger("ai_tutor.routes")
 
 router = APIRouter(prefix="/api/tutor", tags=["tutor"])
 
@@ -34,6 +27,7 @@ async def health_check():
     return {
         "status": "healthy",
         "service": "AI Quest Tutor Agent Service",
+        "storage": "MongoDB Atlas",
         "timestamp": datetime.utcnow().isoformat()
     }
 
@@ -66,131 +60,169 @@ async def get_tutor_curriculum_context():
         })
     return {"courses": curriculum}
 
+def clean_optional(value: Optional[Any]) -> Optional[str]:
+    """Cleans optional request strings, treating placeholders like 'string', 'null', 'none' as None."""
+    if value is None:
+        return None
+    val_str = str(value).strip()
+    if not val_str or val_str.lower() in {"string", "null", "none", "undefined"}:
+        return None
+    return val_str
+
 @router.post("/chat", response_model=TutorChatResponse)
 async def tutor_chat(
     payload: TutorChatRequest,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncIOMotorDatabase = Depends(get_db)
 ):
-    """Processes student message using the AI Tutor Agent with adaptive pedagogy and conversation memory."""
+    """Processes student message using the AI Tutor Agent with adaptive pedagogy and MongoDB conversation memory."""
     try:
-        user_id = payload.user_id or "student_explorer"
-        conversation_id = payload.conversation_id or f"conv-{uuid.uuid4().hex[:12]}"
+        user_id = clean_optional(payload.user_id) or "student_explorer"
+        course_id = clean_optional(payload.course_id)
+        module_id = clean_optional(payload.module_id)
+        lesson_id = clean_optional(payload.lesson_id)
+        conversation_id = clean_optional(payload.conversation_id)
+        topic = clean_optional(payload.topic)
+        student_name = clean_optional(payload.student_name) or "AI Explorer"
+        mentor_style = clean_optional(payload.mentor_style) or "Friend"
+        action_type = clean_optional(payload.action_type) or "ask"
+        current_difficulty = clean_optional(payload.current_difficulty) or "beginner"
 
-        # 1. Fetch or initialize UserSession for adaptive tracking
-        session_result = await db.execute(
-            select(UserSession).where(UserSession.user_id == user_id)
-        )
-        user_session = session_result.scalar_one_or_none()
+        conversation_id = conversation_id or f"conv-{uuid.uuid4().hex[:12]}"
+
+        # 1. Fetch or initialize UserSession in MongoDB
+        user_session = await db.user_sessions.find_one({"user_id": user_id})
         if not user_session:
-            user_session = UserSession(
-                id=f"sess-{user_id}",
-                user_id=user_id,
-                difficulty=payload.current_difficulty or "beginner",
-                current_course_id=payload.course_id,
-                current_module_id=payload.module_id,
-                current_lesson_id=payload.lesson_id
-            )
-            db.add(user_session)
+            user_session = {
+                "id": f"sess-{user_id}",
+                "user_id": user_id,
+                "difficulty": current_difficulty,
+                "current_course_id": course_id or "machine-learning",
+                "current_module_id": module_id or "ml-m1",
+                "current_lesson_id": lesson_id or "ml-l5-classification",
+                "consecutive_correct": 0,
+                "consecutive_struggles": 0,
+                "total_xp": 0,
+                "created_at": datetime.utcnow(),
+                "updated_at": datetime.utcnow()
+            }
+            await db.user_sessions.insert_one(user_session)
         else:
-            if payload.course_id:
-                user_session.current_course_id = payload.course_id
-            if payload.module_id:
-                user_session.current_module_id = payload.module_id
-            if payload.lesson_id:
-                user_session.current_lesson_id = payload.lesson_id
+            update_session: Dict[str, Any] = {"updated_at": datetime.utcnow()}
+            if course_id:
+                update_session["current_course_id"] = course_id
+                user_session["current_course_id"] = course_id
+            if module_id:
+                update_session["current_module_id"] = module_id
+                user_session["current_module_id"] = module_id
+            if lesson_id:
+                update_session["current_lesson_id"] = lesson_id
+                user_session["current_lesson_id"] = lesson_id
+            await db.user_sessions.update_one({"user_id": user_id}, {"$set": update_session})
 
-        # 2. Fetch or create Conversation
-        conv_result = await db.execute(
-            select(Conversation).where(Conversation.id == conversation_id)
-        )
-        conversation = conv_result.scalar_one_or_none()
-        if not conversation:
-            conversation = Conversation(
-                id=conversation_id,
-                user_id=user_id,
-                course_id=payload.course_id,
-                lesson_id=payload.lesson_id
+        # 2. Fetch or create Conversation in MongoDB
+        conv = await db.conversations.find_one({"id": conversation_id})
+        if not conv:
+            conv = {
+                "id": conversation_id,
+                "user_id": user_id,
+                "course_id": course_id or clean_optional(user_session.get("current_course_id")) or "machine-learning",
+                "lesson_id": lesson_id or clean_optional(user_session.get("current_lesson_id")) or "ml-l5-classification",
+                "created_at": datetime.utcnow(),
+                "updated_at": datetime.utcnow()
+            }
+            await db.conversations.insert_one(conv)
+        else:
+            await db.conversations.update_one(
+                {"id": conversation_id},
+                {"$set": {"updated_at": datetime.utcnow()}}
             )
-            db.add(conversation)
-            await db.flush()
 
-        # 3. Retrieve recent conversation history for agent context
-        history_result = await db.execute(
-            select(MessageRecord)
-            .where(MessageRecord.conversation_id == conversation_id)
-            .order_by(MessageRecord.created_at.desc())
-            .limit(6)
-        )
-        past_messages = list(reversed(history_result.scalars().all()))
-        history_lines = [f"{m.sender.upper()}: {m.text}" for m in past_messages]
+        # 3. Retrieve recent conversation history from MongoDB for agent context
+        cursor = db.messages.find({"conversation_id": conversation_id}).sort("created_at", -1).limit(6)
+        past_records = await cursor.to_list(length=6)
+        past_records.reverse()
+        history_lines = [f"{m.get('sender', '').upper()}: {m.get('text', '')}" for m in past_records]
         history_summary = "\n".join(history_lines)
 
-        # 4. Save incoming user message
+        # 4. Save incoming user message in MongoDB
         user_msg_id = f"msg-{uuid.uuid4().hex[:12]}"
-        user_record = MessageRecord(
-            id=user_msg_id,
-            conversation_id=conversation_id,
-            sender="user",
-            text=payload.message,
-            difficulty=user_session.difficulty
-        )
-        db.add(user_record)
-        await db.flush()
+        user_record = {
+            "id": user_msg_id,
+            "conversation_id": conversation_id,
+            "sender": "user",
+            "text": payload.message,
+            "difficulty": user_session.get("difficulty", "beginner"),
+            "created_at": datetime.utcnow()
+        }
+        await db.messages.insert_one(user_record)
 
         # 5. Execute Agent Turn
+        effective_course_id = course_id or clean_optional(user_session.get("current_course_id")) or "machine-learning"
+        effective_module_id = module_id or clean_optional(user_session.get("current_module_id")) or "ml-m1"
+        effective_lesson_id = lesson_id or clean_optional(user_session.get("current_lesson_id")) or "ml-l5-classification"
+
         logger.info(f"Received message: {payload.message}")
-        logger.info(f"Current course: {payload.course_id or user_session.current_course_id}")
-        logger.info(f"Current lesson: {payload.lesson_id or user_session.current_lesson_id}")
+        logger.info(f"Current course: {effective_course_id}")
+        logger.info(f"Current lesson: {effective_lesson_id}")
+        logger.info(f"Conversation ID: {conversation_id}")
+        logger.info(f"Topic: {topic}")
 
         agent_result = await tutor_agent_service.execute_tutor_turn(
             user_message=payload.message,
-            course_id=payload.course_id or user_session.current_course_id,
-            module_id=payload.module_id or user_session.current_module_id,
-            lesson_id=payload.lesson_id or user_session.current_lesson_id,
-            mentor_style=payload.mentor_style or "Friend",
-            difficulty=user_session.difficulty,
+            course_id=effective_course_id,
+            module_id=effective_module_id,
+            lesson_id=effective_lesson_id,
+            mentor_style=mentor_style,
+            difficulty=user_session.get("difficulty", "beginner"),
             progress_percent=payload.progress_percent or 0,
-            student_name=payload.student_name or "AI Explorer",
-            action_type=payload.action_type or "ask",
+            student_name=student_name,
+            action_type=action_type,
             history_summary=history_summary,
-            topic=payload.topic
+            topic=topic
         )
 
         logger.info(f"Agent response generated: {agent_result.get('text', '')[:120]}...")
 
-        # 6. Save Tutor Response Message
+        # 6. Save Tutor Response Message in MongoDB
         tutor_msg_id = f"msg-{uuid.uuid4().hex[:12]}"
-        tutor_record = MessageRecord(
-            id=tutor_msg_id,
-            conversation_id=conversation_id,
-            sender="tutor",
-            text=agent_result["text"],
-            concept_tags=json.dumps(agent_result.get("concept_tags", [])),
-            followup_suggestions=json.dumps(agent_result.get("followup_suggestions", [])),
-            difficulty=user_session.difficulty
-        )
-        db.add(tutor_record)
+        tutor_record = {
+            "id": tutor_msg_id,
+            "conversation_id": conversation_id,
+            "sender": "tutor",
+            "text": agent_result["text"],
+            "concept_tags": agent_result.get("concept_tags", []),
+            "followup_suggestions": agent_result.get("followup_suggestions", []),
+            "difficulty": user_session.get("difficulty", "beginner"),
+            "created_at": datetime.utcnow()
+        }
+        await db.messages.insert_one(tutor_record)
 
-        # Award conversational engagement XP
-        user_session.total_xp += agent_result.get("xp", 20)
-        await db.commit()
+        # 7. Award conversational engagement XP in MongoDB
+        earned_xp = agent_result.get("xp", 20)
+        await db.user_sessions.update_one(
+            {"user_id": user_id},
+            {"$inc": {"total_xp": earned_xp}}
+        )
+        await db.users.update_one(
+            {"id": user_id},
+            {"$inc": {"xp": earned_xp}}
+        )
 
         return TutorChatResponse(
             message=agent_result["text"],
             conversation_id=conversation_id,
-            difficulty=user_session.difficulty,
+            difficulty=user_session.get("difficulty", "beginner"),
             suggested_action=agent_result.get("suggested_action", "continue"),
-            xp=agent_result.get("xp", 20),
+            xp=earned_xp,
             concept_tags=agent_result.get("concept_tags", []),
             followup_suggestions=agent_result.get("followup_suggestions", [])
         )
     except Exception as e:
-        await db.rollback()
-        # Clean safe response per security and error handling requirements
+        logger.error(f"Error in tutor_chat: {e}", exc_info=True)
         return TutorChatResponse(
             message="AI Tutor is temporarily unavailable. Please try again in a moment.",
-            conversation_id=payload.conversation_id or f"conv-{uuid.uuid4().hex[:12]}",
-            difficulty=payload.current_difficulty or "beginner",
+            conversation_id=conversation_id,
+            difficulty=current_difficulty,
             suggested_action="retry",
             xp=0,
             concept_tags=["System", "Retry"],
@@ -200,18 +232,15 @@ async def tutor_chat(
 @router.post("/evaluate", response_model=TutorEvaluateResponse)
 async def evaluate_answer(
     payload: TutorEvaluateRequest,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncIOMotorDatabase = Depends(get_db)
 ):
-    """Evaluates a student's answer, awards XP, and adaptively updates difficulty level."""
+    """Evaluates student answer, awards XP, adaptively updates difficulty, and persists record in MongoDB."""
     user_id = payload.user_id or "student_explorer"
     lesson_data = get_lesson_data(payload.course_id, payload.lesson_id) or {}
-    
-    # Analyze student answer
+
     ans = payload.user_answer.strip().lower()
-    words = ans.split()
     q_lower = payload.question.lower()
 
-    # Determine topic from question prompt
     if "overfit" in q_lower:
         is_correct = any(t in ans for t in ["overfit", "variance", "regularization", "dropout", "prun", "more data", "early stop"])
         if is_correct:
@@ -253,76 +282,94 @@ async def evaluate_answer(
             feedback = "Take a close look at the loss jumping from 2.1 to 890 to NaN: the updates are overshooting the valley."
             explanation = "Exploding loss indicates the learning rate is too large and diverging. Decreasing the learning rate stabilizes optimization."
     else:
-        # Classification vs Regression check
         is_correct = any(term in ans for term in ["classification", "category", "categories", "discrete", "buckets", "classes", "multi-class", "fraud"]) and "regression" not in ans[:15]
         if is_correct:
-            feedback = f"Spot on! Outstanding analytical insight. You correctly identified the core principle."
+            feedback = "Spot on! Outstanding analytical insight. You correctly identified the core principle."
             explanation = "Because the target labels are discrete categories rather than a continuous numerical spectrum, the algorithm creates decision boundaries."
         else:
             feedback = "Good effort, but not quite. Remember: numbers with continuous decimals mean regression; distinct category labels mean classification."
             explanation = "Since the choices are distinct categories rather than continuous quantities, this problem is solved using Classification."
 
-    # Fetch UserSession to apply adaptive difficulty adjustments
-    session_result = await db.execute(
-        select(UserSession).where(UserSession.user_id == user_id)
-    )
-    user_session = session_result.scalar_one_or_none()
+    # Fetch UserSession from MongoDB
+    user_session = await db.user_sessions.find_one({"user_id": user_id})
     if not user_session:
-        user_session = UserSession(
-            id=f"sess-{user_id}",
-            user_id=user_id,
-            difficulty=payload.current_difficulty or "beginner"
-        )
-        db.add(user_session)
+        user_session = {
+            "id": f"sess-{user_id}",
+            "user_id": user_id,
+            "difficulty": payload.current_difficulty or "beginner",
+            "consecutive_correct": 0,
+            "consecutive_struggles": 0,
+            "total_xp": 0
+        }
+        await db.user_sessions.insert_one(user_session)
 
-    # Adaptive difficulty progression logic
-    current_diff = user_session.difficulty.lower()
+    current_diff = user_session.get("difficulty", "beginner").lower()
+    consecutive_correct = user_session.get("consecutive_correct", 0)
+    consecutive_struggles = user_session.get("consecutive_struggles", 0)
+
     if is_correct:
-        user_session.consecutive_correct += 1
-        user_session.consecutive_struggles = 0
-        
-        if user_session.consecutive_correct >= 2 and current_diff == "beginner":
-            user_session.difficulty = "intermediate"
-        elif user_session.consecutive_correct >= 3 and current_diff == "intermediate":
-            user_session.difficulty = "advanced"
+        consecutive_correct += 1
+        consecutive_struggles = 0
+        if consecutive_correct >= 2 and current_diff == "beginner":
+            current_diff = "intermediate"
+        elif consecutive_correct >= 3 and current_diff == "intermediate":
+            current_diff = "advanced"
 
         xp_awarded = 30
         next_action = "next_question"
     else:
-        user_session.consecutive_struggles += 1
-        user_session.consecutive_correct = 0
-        
-        if user_session.consecutive_struggles >= 2 and current_diff == "advanced":
-            user_session.difficulty = "intermediate"
-        elif user_session.consecutive_struggles >= 2 and current_diff == "intermediate":
-            user_session.difficulty = "beginner"
+        consecutive_struggles += 1
+        consecutive_correct = 0
+        if consecutive_struggles >= 2 and current_diff == "advanced":
+            current_diff = "intermediate"
+        elif consecutive_struggles >= 2 and current_diff == "intermediate":
+            current_diff = "beginner"
 
         xp_awarded = 10
         next_action = "hint"
 
-    user_session.total_xp += xp_awarded
-
-    # Record evaluation in database
-    eval_record = QuizEvaluationRecord(
-        id=f"eval-{uuid.uuid4().hex[:12]}",
-        user_id=user_id,
-        course_id=payload.course_id,
-        lesson_id=payload.lesson_id,
-        question=payload.question,
-        user_answer=payload.user_answer,
-        correct=is_correct,
-        feedback=feedback,
-        difficulty=user_session.difficulty,
-        xp_awarded=xp_awarded
+    # Update session in MongoDB
+    await db.user_sessions.update_one(
+        {"user_id": user_id},
+        {
+            "$set": {
+                "difficulty": current_diff,
+                "consecutive_correct": consecutive_correct,
+                "consecutive_struggles": consecutive_struggles,
+                "updated_at": datetime.utcnow()
+            },
+            "$inc": {"total_xp": xp_awarded}
+        },
+        upsert=True
     )
-    db.add(eval_record)
-    await db.commit()
+
+    # Award user XP in MongoDB
+    await db.users.update_one(
+        {"id": user_id},
+        {"$inc": {"xp": xp_awarded}}
+    )
+
+    # Record evaluation document in MongoDB
+    eval_doc = {
+        "id": f"eval-{uuid.uuid4().hex[:12]}",
+        "user_id": user_id,
+        "course_id": payload.course_id,
+        "lesson_id": payload.lesson_id,
+        "question": payload.question,
+        "user_answer": payload.user_answer,
+        "correct": is_correct,
+        "feedback": feedback,
+        "difficulty": current_diff,
+        "xp_awarded": xp_awarded,
+        "created_at": datetime.utcnow()
+    }
+    await db.quiz_evaluations.insert_one(eval_doc)
 
     return TutorEvaluateResponse(
         correct=is_correct,
         feedback=feedback,
         explanation=explanation,
-        difficulty=user_session.difficulty,
+        difficulty=current_diff,
         next_action=next_action,
         xp_awarded=xp_awarded
     )
@@ -330,27 +377,41 @@ async def evaluate_answer(
 @router.get("/history/{conversation_id}", response_model=ConversationHistoryResponse)
 async def get_conversation_history(
     conversation_id: str,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncIOMotorDatabase = Depends(get_db)
 ):
-    """Fetches stored message history for a conversation."""
-    result = await db.execute(
-        select(MessageRecord)
-        .where(MessageRecord.conversation_id == conversation_id)
-        .order_by(MessageRecord.created_at.asc())
-    )
-    records = result.scalars().all()
-    messages = [
-        ConversationHistoryMessage(
-            id=rec.id,
-            sender=rec.sender,
-            text=rec.text,
-            concept_tags=rec.get_concept_tags(),
-            followup_suggestions=rec.get_followup_suggestions(),
-            difficulty=rec.difficulty,
-            timestamp=rec.created_at.strftime("%I:%M %p")
+    """Fetches stored message history for a conversation from MongoDB."""
+    cursor = db.messages.find({"conversation_id": conversation_id}).sort("created_at", 1)
+    records = await cursor.to_list(length=100)
+
+    messages = []
+    for rec in records:
+        dt = rec.get("created_at")
+        time_str = dt.strftime("%I:%M %p") if isinstance(dt, datetime) else "Just now"
+        tags = rec.get("concept_tags", [])
+        if isinstance(tags, str):
+            try:
+                tags = json.loads(tags)
+            except Exception:
+                tags = []
+        suggestions = rec.get("followup_suggestions", [])
+        if isinstance(suggestions, str):
+            try:
+                suggestions = json.loads(suggestions)
+            except Exception:
+                suggestions = []
+
+        messages.append(
+            ConversationHistoryMessage(
+                id=rec.get("id", f"msg-{uuid.uuid4().hex[:8]}"),
+                sender=rec.get("sender", "user"),
+                text=rec.get("text", ""),
+                concept_tags=tags,
+                followup_suggestions=suggestions,
+                difficulty=rec.get("difficulty"),
+                timestamp=time_str
+            )
         )
-        for rec in records
-    ]
+
     return ConversationHistoryResponse(
         conversation_id=conversation_id,
         messages=messages

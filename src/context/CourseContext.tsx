@@ -103,6 +103,33 @@ export const CourseProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     return DEFAULT_BOOKMARKS;
   });
 
+  // Hydrate course progress and bookmarks from MongoDB
+  useEffect(() => {
+    if (user?.id) {
+      fetch('/api/progress/courses', {
+        headers: { 'X-User-Id': user.id }
+      })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (d && d.progress && Object.keys(d.progress).length > 0) {
+          setProgress((prev) => ({ ...prev, ...d.progress }));
+        }
+      })
+      .catch((e) => console.debug('Course progress MongoDB hydration note', e));
+
+      fetch('/api/progress/bookmarks', {
+        headers: { 'X-User-Id': user.id }
+      })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (d && d.bookmarks && d.bookmarks.length > 0) {
+          setBookmarks(d.bookmarks);
+        }
+      })
+      .catch((e) => console.debug('Bookmarks MongoDB hydration note', e));
+    }
+  }, [user?.id]);
+
   // Sync with user change or localStorage
   useEffect(() => {
     try {
@@ -224,6 +251,18 @@ export const CourseProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       [courseId]: updated
     }));
 
+    // Persist course progress to MongoDB
+    if (user?.id) {
+      fetch('/api/progress/courses', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-User-Id': user.id
+        },
+        body: JSON.stringify(updated)
+      }).catch((e) => console.debug('MongoDB course progress sync note', e));
+    }
+
     if (!alreadyDone) {
       sound.playCorrect();
     }
@@ -243,6 +282,12 @@ export const CourseProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     if (existingIndex >= 0) {
       // Remove
       setBookmarks((prev) => prev.filter((b) => b.lessonId !== item.lessonId));
+      if (user?.id) {
+        fetch(`/api/progress/bookmarks/${item.lessonId}`, {
+          method: 'DELETE',
+          headers: { 'X-User-Id': user.id }
+        }).catch((e) => console.debug('MongoDB bookmark delete note', e));
+      }
       return false;
     } else {
       // Add
@@ -252,6 +297,16 @@ export const CourseProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         addedAt: new Date().toISOString()
       };
       setBookmarks((prev) => [newBm, ...prev]);
+      if (user?.id) {
+        fetch('/api/progress/bookmarks', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-User-Id': user.id
+          },
+          body: JSON.stringify(newBm)
+        }).catch((e) => console.debug('MongoDB bookmark save note', e));
+      }
       return true;
     }
   };
@@ -259,6 +314,12 @@ export const CourseProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const removeBookmark = (lessonId: string) => {
     sound.playClick();
     setBookmarks((prev) => prev.filter((b) => b.lessonId !== lessonId));
+    if (user?.id) {
+      fetch(`/api/progress/bookmarks/${lessonId}`, {
+        method: 'DELETE',
+        headers: { 'X-User-Id': user.id }
+      }).catch((e) => console.debug('MongoDB bookmark delete note', e));
+    }
   };
 
   const isBookmarked = (lessonId: string): boolean => {

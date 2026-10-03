@@ -125,6 +125,51 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }, [user]);
 
+  // Hydrate user from MongoDB on initial mount
+  useEffect(() => {
+    const authSession = localStorage.getItem(AUTH_SESSION_KEY);
+    if (authSession && user?.id) {
+      fetch('/api/auth/me', {
+        headers: { 'X-User-Id': user.id }
+      })
+      .then(res => res.ok ? res.json() : null)
+      .then(data => {
+        if (data && data.user) {
+          setUser(prev => ({
+            ...prev,
+            ...data.user,
+            isAuthenticated: true,
+          }));
+        }
+      })
+      .catch(e => console.debug('MongoDB user hydration note', e));
+    }
+  }, []);
+
+  // Sync progress changes to MongoDB
+  useEffect(() => {
+    if (user?.isAuthenticated && user?.id) {
+      fetch('/api/auth/progress', {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-User-Id': user.id
+        },
+        body: JSON.stringify({
+          level: user.level,
+          xp: user.xp,
+          streak: user.streak,
+          completedMissions: user.completedMissions,
+          completedQuests: user.completedQuests,
+          defeatedBosses: user.defeatedBosses,
+          unlockedAchievements: user.unlockedAchievements,
+          mastery: user.mastery,
+          lastActiveDate: user.lastActiveDate
+        })
+      }).catch(e => console.debug('Progress MongoDB sync note', e));
+    }
+  }, [user.level, user.xp, user.streak, user.completedMissions?.length, user.unlockedAchievements?.length, user.defeatedBosses?.length]);
+
   // Auth Methods
   const login = async (credentials: AuthCredentials): Promise<{ success: boolean; error?: string }> => {
     const email = credentials.email.trim();
@@ -135,7 +180,34 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
       return { success: false, error: 'Please enter your password.' };
     }
 
-    // Simulate latency
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password: credentials.password, rememberMe: credentials.rememberMe })
+      });
+      if (res.ok) {
+        const json = await res.json();
+        if (json.success && json.user) {
+          const sessionData = {
+            email,
+            token: json.token,
+            timestamp: Date.now(),
+            rememberMe: credentials.rememberMe || false,
+          };
+          localStorage.setItem(AUTH_SESSION_KEY, JSON.stringify(sessionData));
+          setUser({ ...json.user, isAuthenticated: true });
+          sound.playCorrect();
+          return { success: true };
+        } else if (!json.success) {
+          return { success: false, error: json.error || 'Invalid credentials' };
+        }
+      }
+    } catch (e) {
+      console.warn('Backend login fallback to local simulation', e);
+    }
+
+    // Local fallback for offline mode
     await new Promise((r) => setTimeout(r, 600));
 
     // Save session in localStorage
@@ -169,9 +241,31 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const loginWithGoogle = async (): Promise<{ success: boolean; error?: string }> => {
+    const googleEmail = 'alex.mercer@gmail.com';
+    try {
+      const res = await fetch('/api/auth/google', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: googleEmail, fullName: 'Alex Mercer' })
+      });
+      if (res.ok) {
+        const json = await res.json();
+        if (json.success && json.user) {
+          localStorage.setItem(
+            AUTH_SESSION_KEY,
+            JSON.stringify({ email: googleEmail, token: json.token, provider: 'google', timestamp: Date.now() })
+          );
+          setUser({ ...json.user, isAuthenticated: true });
+          sound.playLevelUp();
+          return { success: true };
+        }
+      }
+    } catch (e) {
+      console.warn('Backend google auth fallback', e);
+    }
+
     await new Promise((r) => setTimeout(r, 700));
 
-    const googleEmail = 'alex.mercer@gmail.com';
     const googleUserId = 'usr-alex_mercer_gmail_com';
     localStorage.setItem(
       AUTH_SESSION_KEY,
@@ -203,6 +297,30 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
     if (!data.password || data.password.length < 6) {
       return { success: false, error: 'Password must be at least 6 characters.' };
+    }
+
+    try {
+      const res = await fetch('/api/auth/signup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fullName, username, email, password: data.password })
+      });
+      if (res.ok) {
+        const json = await res.json();
+        if (json.success && json.user) {
+          localStorage.setItem(
+            AUTH_SESSION_KEY,
+            JSON.stringify({ email, username, token: json.token, timestamp: Date.now() })
+          );
+          setUser({ ...json.user, isAuthenticated: true });
+          sound.playLevelUp();
+          return { success: true };
+        } else if (!json.success) {
+          return { success: false, error: json.error || 'Signup failed' };
+        }
+      }
+    } catch (e) {
+      console.warn('Backend signup fallback', e);
     }
 
     await new Promise((r) => setTimeout(r, 700));
@@ -282,6 +400,14 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
       avatar: photoDataUrl,
     }));
     sound.playCorrect();
+
+    if (user?.id) {
+      fetch('/api/auth/profile', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'X-User-Id': user.id },
+        body: JSON.stringify({ avatar: photoDataUrl })
+      }).catch(e => console.debug('MongoDB avatar update note', e));
+    }
   };
 
   const removeProfilePhoto = () => {
@@ -297,6 +423,14 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
       avatar: '', // Cleared avatar falls back to DefaultAvatar
     }));
     sound.playClick();
+
+    if (user?.id) {
+      fetch('/api/auth/profile', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'X-User-Id': user.id },
+        body: JSON.stringify({ avatar: '' })
+      }).catch(e => console.debug('MongoDB avatar removal note', e));
+    }
   };
 
   // Game XP / Level Calculations

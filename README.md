@@ -20,14 +20,12 @@ Vite Dev Server Reverse Proxy
 FastAPI Backend Server (Port 8000)
        │
        ├── Course & Curriculum Context Engine (In-Memory Catalog)
-       ├── SQLite Persistent Conversation Memory (SQLAlchemy Async)
+       ├── MongoDB Atlas Persistent Storage (Motor Async Driver)
+       │   ├── users, user_sessions, courses_progress, bookmarks
+       │   └── conversations, messages, quiz_evaluations
        ├── Adaptive Difficulty & Pedagogical Persona Engine
        ▼
-OpenAI Agents SDK (`Agent` + `Runner`)
-       │
-       ├── Tools: get_current_lesson, get_course_syllabus, generate_practice_question, evaluate_answer
-       ▼
-OpenAI LLM API (e.g. `gpt-4o-mini` / `gpt-4o`)
+Google Gemini API / LLM (`gemini-3.5-flash-lite`)
 ```
 
 ---

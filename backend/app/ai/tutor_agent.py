@@ -47,6 +47,13 @@ CORE_TOPICS = {
     "neural network": "Neural Networks",
     "neural networks": "Neural Networks",
     "deep learning": "Neural Networks",
+    "cnn": "Convolutional Neural Networks (CNN)",
+    "convolutional neural network": "Convolutional Neural Networks (CNN)",
+    "convolutional neural networks": "Convolutional Neural Networks (CNN)",
+    "convolutional": "Convolutional Neural Networks (CNN)",
+    "rnn": "Recurrent Neural Networks (RNN)",
+    "recurrent neural network": "Recurrent Neural Networks (RNN)",
+    "recurrent neural networks": "Recurrent Neural Networks (RNN)",
     "support vector machine": "Support Vector Machines",
     "svm": "Support Vector Machines",
     "random forest": "Random Forests",
@@ -62,6 +69,8 @@ CORE_TOPICS = {
     "pca": "Principal Component Analysis",
     "dimensionality reduction": "Principal Component Analysis",
     "transformer": "Transformers",
+    "transformers": "Transformers",
+    "attention mechanism": "Attention Mechanism",
     "attention": "Attention Mechanism"
 }
 
@@ -71,55 +80,95 @@ def detect_active_topic(
     explicit_topic: Optional[str] = None,
     default_lesson_title: str = "Machine Learning"
 ) -> str:
-    """Accurately extracts or preserves the student's active conceptual topic."""
-    # 1. Direct explicit topic if provided
-    if explicit_topic and explicit_topic.strip():
-        lower_ex = explicit_topic.lower().strip()
+    """Accurately extracts or preserves the student's active conceptual topic.
+    
+    Priority Rules:
+    1. A new student question in user_message ALWAYS takes top priority for topic detection,
+       allowing seamless switching between topics (e.g. from Overfitting to Gradient Descent to CNN).
+    2. Explicit topic is used if valid and when the user message does not specify a different topic
+       (e.g. follow-up questions like 'Explain more simply' or 'Give me an example').
+    3. Placeholders such as 'string', 'null', 'none' are defensively ignored and never treated as topics.
+    4. Recent conversation history is checked in reverse for context on action requests.
+    5. Fallback to default lesson title (ensuring it is not a placeholder).
+    """
+    # 0. Defensive cleanup of explicit_topic (reject placeholders like 'string', 'null', 'none')
+    cleaned_explicit: Optional[str] = None
+    if explicit_topic and isinstance(explicit_topic, str):
+        trimmed = explicit_topic.strip()
+        if trimmed and trimmed.lower() not in {"string", "null", "none", "undefined"}:
+            cleaned_explicit = trimmed
+
+    lower_msg = user_message.lower().strip()
+
+    # 1. Check if user_message directly asks about or contains a core concept.
+    # Match sorted by length descending so multi-word terms match before subterms.
+    detected_from_msg: Optional[str] = None
+    for kw in sorted(CORE_TOPICS.keys(), key=len, reverse=True):
+        if re.search(r'\b' + re.escape(kw) + r'\b', lower_msg):
+            detected_from_msg = CORE_TOPICS[kw]
+            break
+
+    if not detected_from_msg:
+        for kw in sorted(CORE_TOPICS.keys(), key=len, reverse=True):
+            if kw in lower_msg:
+                detected_from_msg = CORE_TOPICS[kw]
+                break
+
+    # If no core topic matched, check for direct question phrasing ("What is X?", "Explain X")
+    if not detected_from_msg:
+        match = re.search(r'(?:what is|what are|explain|tell me about|how does|what is a|what is an)\s+([a-zA-Z0-9\s\-]+?)(?:\?|$|\.|\!)', lower_msg, re.IGNORECASE)
+        if match:
+            extracted = match.group(1).strip()
+            if extracted.lower().startswith("a "):
+                extracted = extracted[2:].strip()
+            elif extracted.lower().startswith("an "):
+                extracted = extracted[3:].strip()
+            if len(extracted) > 1 and extracted.lower() not in ("it", "this", "that", "more", "string", "null", "none"):
+                lower_ext = extracted.lower()
+                for kw, canonical in CORE_TOPICS.items():
+                    if kw in lower_ext or lower_ext in kw:
+                        detected_from_msg = canonical
+                        break
+                if not detected_from_msg:
+                    detected_from_msg = extracted.title() if not extracted.isupper() else extracted
+
+    # If the user's message introduces/asks about a topic, that new question wins!
+    if detected_from_msg:
+        return detected_from_msg
+
+    # 2. If user message didn't specify a new topic, use valid explicit_topic if provided
+    if cleaned_explicit:
+        lower_ex = cleaned_explicit.lower()
         for kw, canonical in CORE_TOPICS.items():
             if kw in lower_ex:
                 return canonical
-        return explicit_topic.strip()
+        return cleaned_explicit
 
-    # 2. Extract from current user message
-    lower_msg = user_message.lower().strip()
-    for kw, canonical in CORE_TOPICS.items():
-        # Match whole word or exact substring
-        if re.search(r'\b' + re.escape(kw) + r'\b', lower_msg):
-            return canonical
-
-    # 3. Check for broader substring matches
-    for kw, canonical in CORE_TOPICS.items():
-        if kw in lower_msg:
-            return canonical
-
-    # 4. If current message is an action button (e.g. "Give Me an Example", "Test My Understanding"),
+    # 3. If current message is an action button (e.g. "Give Me an Example", "Test My Understanding"),
     # search recent conversation history in reverse to identify the active subject being discussed.
-    # Prioritize USER messages first to capture the student's primary topic of inquiry.
     if history_summary:
         lines = [line.strip() for line in history_summary.split("\n") if line.strip()]
         for line in reversed(lines):
             if line.upper().startswith("USER:"):
                 lower_line = line.lower()
-                for kw, canonical in CORE_TOPICS.items():
+                for kw in sorted(CORE_TOPICS.keys(), key=len, reverse=True):
+                    canonical = CORE_TOPICS[kw]
                     if re.search(r'\b' + re.escape(kw) + r'\b', lower_line) or kw in lower_line:
                         return canonical
 
         # If no topic found in user questions, check tutor messages in reverse
         for line in reversed(lines):
             lower_line = line.lower()
-            for kw, canonical in CORE_TOPICS.items():
+            for kw in sorted(CORE_TOPICS.keys(), key=len, reverse=True):
+                canonical = CORE_TOPICS[kw]
                 if re.search(r'\b' + re.escape(kw) + r'\b', lower_line) or kw in lower_line:
                     return canonical
 
-    # 5. Extract noun phrase from question if present (e.g. "What is X?")
-    match = re.search(r'(?:what is|explain|tell me about|how does|what are)\s+([a-zA-Z0-9\s\-]+?)(?:\?|$|\.|\!)', lower_msg, re.IGNORECASE)
-    if match:
-        extracted = match.group(1).strip().title()
-        if len(extracted) > 2 and extracted.lower() not in ("it", "this", "that", "more"):
-            return extracted
+    # 4. Fallback to default lesson title (ensure it is not 'string')
+    if default_lesson_title and default_lesson_title.strip().lower() not in {"string", "null", "none"}:
+        return default_lesson_title.strip()
 
-    # 6. Fallback to lesson title
-    return default_lesson_title
+    return "Machine Learning"
 
 def build_system_instructions(
     mentor_style: str,
@@ -217,11 +266,18 @@ class AITutorAgentService:
         lesson_title = lesson_data.get("title", "Core AI Concepts")
         learning_objective = lesson_data.get("learning_objective", "Master fundamental concepts")
 
+        # Defensive cleanup of topic parameter: treat placeholders like 'string' as None
+        safe_topic = None
+        if topic and isinstance(topic, str):
+            trimmed_topic = topic.strip()
+            if trimmed_topic and trimmed_topic.lower() not in {"string", "null", "none", "undefined"}:
+                safe_topic = trimmed_topic
+
         # Detect the active topic from user query, history, or explicit topic parameter
         active_topic = detect_active_topic(
             user_message=user_message,
             history_summary=history_summary,
-            explicit_topic=topic,
+            explicit_topic=safe_topic,
             default_lesson_title=lesson_title
         )
 
@@ -995,6 +1051,19 @@ class AITutorAgentService:
             )
             tags = ["Logistic Regression", "Sigmoid Function", "Binary Classification", "Machine Learning"]
             followups = ["Give Me an Example", "Test My Understanding", "What's the difference between linear and logistic regression?", "Explain More Simply"]
+
+        elif "cnn" in topic_lower or "convolutional" in topic_lower:
+            text = (
+                "**Convolutional Neural Networks (CNNs)** are specialized deep learning architectures designed for processing grid-structured data such as images!\n\n"
+                "**The Core Architecture:**\n"
+                "• **Convolutional Layers:** Slide learnable filters (kernels) across images to extract local spatial features (edges, textures, shapes).\n"
+                "• **Activation Function (ReLU):** Introduces non-linearity to capture intricate visual hierarchies.\n"
+                "• **Pooling Layers (Max Pooling):** Downsamples feature maps to reduce spatial dimensions, computing costs, and achieve translation invariance.\n"
+                "• **Fully Connected (Dense) Layers:** Combines high-level extracted representations to make final predictions (e.g., Cat vs. Dog).\n\n"
+                "Unlike standard multi-layer perceptrons that flatten images and lose 2D geometry, CNNs preserve spatial relationships through **parameter sharing** and **local receptive fields**."
+            )
+            tags = ["CNN", "Convolutional Neural Networks", "Computer Vision", "Deep Learning"]
+            followups = ["Give Me an Example", "Test My Understanding", "What is Max Pooling?", "Explain More Simply"]
 
         elif "neural network" in topic_lower or "deep learning" in topic_lower:
             text = (
