@@ -1,5 +1,7 @@
 import { MentorType, ChatMessage } from '../types';
 
+const API_URL = (import.meta.env.VITE_API_URL || '').replace(/\/+$/, '');
+
 export interface GenerateResponseParams {
   mentor: MentorType;
   userMessage: string;
@@ -45,8 +47,15 @@ export interface AgentEvaluationResponse {
 }
 
 const detectLocalTopic = (query: string, explicitTopic?: string): string => {
-  if (explicitTopic && explicitTopic.trim()) return explicitTopic.trim();
+  if (explicitTopic && explicitTopic.trim()) {
+    const trimmed = explicitTopic.trim();
+    if (!['string', 'null', 'none', 'undefined'].includes(trimmed.toLowerCase())) {
+      return trimmed;
+    }
+  }
   const lower = query.toLowerCase();
+  if (lower.includes('cnn') || lower.includes('convolutional')) return 'Convolutional Neural Networks (CNN)';
+  if (lower.includes('neural network') || lower.includes('deep learning')) return 'Neural Networks';
   if (lower.includes('overfit')) return 'Overfitting';
   if (lower.includes('underfit')) return 'Underfitting';
   if (lower.includes('precision') || lower.includes('recall')) return 'Precision and Recall';
@@ -94,7 +103,7 @@ export const generateTutorResponse = async ({
       topic: activeTopic
     };
 
-    const res = await fetch('/api/tutor/chat', {
+    const res = await fetch(`${API_URL}/api/tutor/chat`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
@@ -160,6 +169,14 @@ export const generateTutorResponse = async ({
     conceptTags = ['Decision Trees', 'Supervised Learning', 'Explainability'];
     text = `A **Decision Tree** is a flowchart-like model that makes predictions by asking a sequence of 'if-this-then-that' questions on feature values.\n\n**How it works:**\n• **Root Node:** Top-level question that splits data on the most informative feature (maximizing Information Gain).\n• **Internal Nodes:** Successive decision branches.\n• **Leaf Nodes:** Terminal outcomes that assign the final predicted class or value.\n\n**Pros & Cons:** Highly explainable and intuitive, but prone to overfitting unless pruned with depth limits.`;
     followupSuggestions = ["Give Me an Example", "Test My Understanding", "Explain More Simply", "What are Random Forests?"];
+  } else if (activeTopic === 'Convolutional Neural Networks (CNN)' || activeTopic === 'CNN') {
+    conceptTags = ['CNN', 'Convolutional Neural Networks', 'Computer Vision'];
+    text = `**Convolutional Neural Networks (CNNs)** are specialized neural network architectures designed specifically for processing spatial data like images!\n\n**How CNNs Work:**\n• **Convolutional Layers:** Slide learnable filters (kernels) across images to detect local visual features (edges, textures, shapes).\n• **Pooling Layers (Max Pooling):** Downsamples feature maps to reduce spatial dimensions, computing costs, and achieve translation invariance.\n• **Dense (Fully Connected) Layers:** Flattens high-level features for the final classification prediction.\n\nThey preserve spatial relationships through **local connectivity** and **parameter sharing**!`;
+    followupSuggestions = ["Give Me an Example", "Test My Understanding", "What is Max Pooling?", "Explain More Simply"];
+  } else if (activeTopic === 'Neural Networks') {
+    conceptTags = ['Neural Networks', 'Deep Learning', 'Backpropagation'];
+    text = `**Neural Networks** are computational models inspired by biological brain neurons, designed to learn complex non-linear patterns!\n\n**Core Architecture:**\n• **Input Layer:** Receives raw features (pixels, text tokens, tabular numbers).\n• **Hidden Layers:** Layers of interconnected artificial neurons computing weighted sums with non-linear activations (like ReLU).\n• **Output Layer:** Delivers the final prediction.\n\nThey learn through **Forward Propagation** and **Backpropagation** with gradient descent to minimize loss!`;
+    followupSuggestions = ["Give Me an Example", "Test My Understanding", "What is Backpropagation?", "Explain More Simply"];
   } else if (activeTopic === 'Gradient Descent') {
     conceptTags = ['Gradient Descent', 'Optimization', 'Learning Rate'];
     text = `**Gradient Descent** is the iterative optimization algorithm used to train machine learning models and neural networks by minimizing error (loss).\n\n**The Mountain Analogy:**\nImagine you are blindfolded on a foggy mountain and want to reach the lowest valley floor. You feel the slope beneath your feet and step in the direction that slopes downhill most steeply.\n\n**Key Factors:**\n• **Loss Function:** The mountain height (error rate).\n• **Learning Rate ($\\alpha$):** The step size. If too large, you overshoot and diverge; if too small, convergence takes forever.`;
@@ -199,7 +216,7 @@ export const evaluateStudentAnswer = async ({
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 10000);
 
-    const res = await fetch('/api/tutor/evaluate', {
+    const res = await fetch(`${API_URL}/api/tutor/evaluate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       signal: controller.signal,
